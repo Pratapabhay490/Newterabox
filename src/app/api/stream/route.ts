@@ -27,18 +27,31 @@ export async function GET(req: NextRequest) {
     return new NextResponse("Invalid 'u' URL", { status: 400 });
   }
 
-  // Allowlist: only proxy hosts that look like TeraBox/Baidu CDNs to
-  // avoid turning this endpoint into an open relay.
+  // Allowlist: only proxy hosts that look like TeraBox / Baidu CDNs so
+  // the endpoint can't be used as an open relay. We use a token-substring
+  // check so new mirror hostnames work without code changes.
   const host = parsed.hostname.toLowerCase();
-  const allowed =
-    host.endsWith(".terabox.com") ||
-    host.endsWith(".1024tera.com") ||
-    host.endsWith(".4funbox.com") ||
-    host.endsWith(".mirrobox.com") ||
-    host.endsWith(".dubox.com") ||
-    host.endsWith(".pcs.baidu.com") ||
-    host.endsWith(".baidupcs.com") ||
-    host.endsWith(".terabox.app");
+  const ALLOWED_TOKENS = [
+    "terabox",
+    "1024tera",
+    "4funbox",
+    "mirrobox",
+    "nephobox",
+    "momerybox",
+    "tibibox",
+    "dubox",
+    "freeterabox",
+    "teraboxapp",
+    "teraboxlink",
+    "teraboxshare",
+    "terashare",
+    "terafileshare",
+    // Baidu PCS CDNs that often serve the actual bytes
+    "pcs.baidu.com",
+    "baidupcs.com",
+    "pcs-cloud.com",
+  ];
+  const allowed = ALLOWED_TOKENS.some((token) => host.includes(token));
 
   if (!allowed) {
     return new NextResponse("Host not allowed", { status: 403 });

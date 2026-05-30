@@ -139,6 +139,12 @@ class PublicStrategy implements ExtractionStrategy {
       );
     }
 
+    // Use the share link's own host for follow-up API calls. Different
+    // TeraBox mirrors (terabox.com, 1024tera.com, 4funbox.com, …) issue
+    // their own jsToken cookies, so we MUST stay on the same host.
+    const shareUrl = new URL(url);
+    const apiHost = `${shareUrl.protocol}//${shareUrl.host}`;
+
     // Step 1: load the share page to harvest cookies + jsToken + shareid + uk.
     const pageRes = await fetch(url, {
       headers: { "user-agent": userAgent() },
@@ -180,8 +186,8 @@ class PublicStrategy implements ExtractionStrategy {
       );
     }
 
-    // Step 2: list files in the share.
-    const listUrl = new URL("https://www.terabox.com/share/list");
+    // Step 2: list files in the share. Stay on the same host as the share URL.
+    const listUrl = new URL(`${apiHost}/share/list`);
     listUrl.searchParams.set("app_id", "250528");
     listUrl.searchParams.set("web", "1");
     listUrl.searchParams.set("channel", "dubox");
@@ -254,7 +260,7 @@ class PublicStrategy implements ExtractionStrategy {
       "fid_list": `[${fsId}]`,
     });
 
-    const dlRes = await fetch("https://www.terabox.com/api/download", {
+    const dlRes = await fetch(`${apiHost}/api/download`, {
       method: "POST",
       headers: {
         "content-type": "application/x-www-form-urlencoded",

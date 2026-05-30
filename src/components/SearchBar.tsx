@@ -12,15 +12,19 @@ export default function SearchBar({ onSubmit, disabled }: Props) {
   const [value, setValue] = useState("");
   const [touched, setTouched] = useState(false);
 
-  const isValid = value.trim().length === 0 || isTeraBoxUrl(value.trim());
-  const showError = touched && value.trim().length > 0 && !isValid;
+  // Soft check only — we never block submission. The server is the source
+  // of truth for whether a URL is actually extractable, since TeraBox uses
+  // many mirror domains we can't fully enumerate on the client.
+  const trimmed = value.trim();
+  const looksValid = trimmed.length === 0 || isTeraBoxUrl(trimmed);
+  const showWarning = touched && trimmed.length > 0 && !looksValid;
 
   const handleSubmit = useCallback(
     (e: FormEvent) => {
       e.preventDefault();
       setTouched(true);
       const url = value.trim();
-      if (!url || !isTeraBoxUrl(url)) return;
+      if (!url) return;
       onSubmit(url);
     },
     [value, onSubmit],
@@ -40,7 +44,7 @@ export default function SearchBar({ onSubmit, disabled }: Props) {
       <div
         className={[
           "glass-strong group relative flex items-center gap-2 rounded-2xl px-3 py-2 shadow-glass transition",
-          showError ? "ring-2 ring-red-500/50" : "focus-within:shadow-glow",
+          showWarning ? "ring-2 ring-amber-400/50" : "focus-within:shadow-glow",
         ].join(" ")}
       >
         <LinkIcon className="ml-1 h-5 w-5 shrink-0 text-slate-400" />
@@ -79,9 +83,10 @@ export default function SearchBar({ onSubmit, disabled }: Props) {
         </button>
       </div>
 
-      {showError && (
-        <p className="px-2 text-xs text-red-400">
-          That doesn&apos;t look like a TeraBox share link.
+      {showWarning && (
+        <p className="px-2 text-xs text-amber-300/90">
+          This doesn&apos;t look like a typical TeraBox link, but we&apos;ll
+          still try.
         </p>
       )}
     </form>

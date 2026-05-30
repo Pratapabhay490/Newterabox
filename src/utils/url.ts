@@ -1,31 +1,39 @@
 /**
  * URL validation utilities for TeraBox links.
  *
- * TeraBox is served under many mirror domains. We accept the most common ones.
- * If the user pastes a link from a domain we don't know, we still let the
- * server attempt extraction (the extractor will reject it cleanly).
+ * TeraBox runs under dozens of constantly-changing mirror domains, so a
+ * strict allowlist quickly goes out of date. We use two signals instead:
+ *
+ *   1. The URL has a TeraBox-style share path: /s/<id> or ?surl=<id>.
+ *   2. The hostname contains a known TeraBox-family token (terabox, dubox,
+ *      4funbox, mirrobox, 1024tera, nephobox, momerybox, tibibox, etc.).
+ *
+ * If either is true we let the request through. The server-side extractor
+ * is the source of truth — if a URL slips past these heuristics but isn't
+ * actually a TeraBox share, the extractor returns a clean INVALID_URL.
  */
 
-const TERABOX_HOSTS = [
-  "terabox.com",
-  "www.terabox.com",
-  "terabox.app",
-  "www.terabox.app",
-  "1024tera.com",
-  "www.1024tera.com",
-  "4funbox.com",
-  "www.4funbox.com",
-  "mirrobox.com",
-  "www.mirrobox.com",
-  "nephobox.com",
-  "www.nephobox.com",
-  "teraboxapp.com",
-  "www.teraboxapp.com",
-  "freeterabox.com",
-  "www.freeterabox.com",
-  "momerybox.com",
-  "tibibox.com",
+/** Tokens that, if present in the hostname, identify a TeraBox-family domain. */
+const TERABOX_HOST_TOKENS = [
+  "terabox",
+  "dubox",
+  "4funbox",
+  "mirrobox",
+  "nephobox",
+  "momerybox",
+  "tibibox",
+  "1024tera",
+  "freeterabox",
+  "teraboxapp",
+  "teraboxlink",
+  "teraboxshare",
+  "terashare",
+  "terafileshare",
+  "tibibox",
 ];
+
+/** Path patterns that look like a TeraBox share. */
+const SHARE_PATH_RE = /\/s\/[A-Za-z0-9_-]+/i;
 
 export function isValidUrl(value: string): boolean {
   try {
@@ -37,18 +45,28 @@ export function isValidUrl(value: string): boolean {
   }
 }
 
+/** Does the hostname contain any TeraBox-family token? */
+export function hasTeraBoxHostToken(host: string): boolean {
+  const h = host.toLowerCase();
+  return TERABOX_HOST_TOKENS.some((token) => h.includes(token));
+}
+
+/**
+ * Permissive check — true if the URL plausibly points at a TeraBox share.
+ * Errs on the side of accepting unknown mirrors rather than blocking them.
+ */
 export function isTeraBoxUrl(value: string): boolean {
   if (!isValidUrl(value)) return false;
   try {
     const u = new URL(value);
-    const host = u.hostname.toLowerCase();
-    return (
-      TERABOX_HOSTS.includes(host) ||
-      host.endsWith(".terabox.com") ||
-      host.endsWith(".1024tera.com") ||
-      host.endsWith(".4funbox.com") ||
-      host.endsWith(".mirrobox.com")
-    );
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+
+    const hostMatches = hasTeraBoxHostToken(u.hostname);
+    const shapeMatches =
+      SHARE_PATH_RE.test(u.pathname) || u.searchParams.has("surl");
+
+    // Accept if EITHER signal fires. Most legitimate links match both.
+    return hostMatches || shapeMatches;
   } catch {
     return false;
   }
@@ -59,11 +77,11 @@ export function extractShareId(rawUrl: string): string | null {
   try {
     const u = new URL(rawUrl);
     // /s/{shorturl} pattern
-    const match = u.pathname.match(/\/s\/([^/?#]+)/i);
+    const match = u.pathname.match(/\/s\/([A-Za-z0-9_-]+)/i);
     if (match) return match[1].replace(/^1/, ""); // TeraBox prefixes "1" sometimes
     // ?surl=xxx pattern
     const surl = u.searchParams.get("surl");
-    if (surl) return surl;
+    if (surl) return surl.replace(/^1/, "");
     return null;
   } catch {
     return null;
