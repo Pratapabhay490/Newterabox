@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import "plyr/dist/plyr.css";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: theme("colors.ink.950");
+  color: #e7ecf3;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Selection */
+::selection {
+  background: rgba(77, 147, 255, 0.35);
+  color: #fff;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: theme("colors.ink.900");
+}
+::-webkit-scrollbar-thumb {
+  background: theme("colors.ink.700");
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: theme("colors.ink.600");
+}
+
+/* Glassmorphism utility */
+@layer components {
+  .glass {
+    @apply bg-white/[0.04] backdrop-blur-xl border border-white/10;
+  }
+  .glass-strong {
+    @apply bg-white/[0.07] backdrop-blur-2xl border border-white/10;
+  }
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-brand-400/60 focus:ring-offset-0;
+  }
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.04) 0%,
+      rgba(255, 255, 255, 0.09) 50%,
+      rgba(255, 255, 255, 0.04) 100%
+    );
+    background-size: 800px 100%;
+    @apply animate-shimmer rounded-md;
+  }
+}
+
+/* Plyr override — match brand */
+:root {
+  --plyr-color-main: theme("colors.brand.500");
+  --plyr-video-background: theme("colors.ink.950");
+  --plyr-control-radius: 8px;
+  --plyr-menu-background: rgba(15, 18, 26, 0.95);
+  --plyr-menu-color: #e7ecf3;
+  --plyr-tooltip-background: rgba(15, 18, 26, 0.95);
+  --plyr-tooltip-color: #e7ecf3;
+  --plyr-range-fill-background: theme("colors.brand.500");
+}
+
+.plyr--video {
+  border-radius: 16px;
+  overflow: hidden;
+}
