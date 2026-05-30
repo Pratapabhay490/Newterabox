@@ -1,17 +1,28 @@
 /**
  * TeraBox extraction strategies.
  *
- * IMPORTANT: TeraBox actively rotates its tokens and endpoints. This file
- * is the ONLY place that needs to change when extraction breaks.
+ * IMPORTANT: TeraBox actively rotates its tokens, endpoints, and auth
+ * requirements. This file is the ONLY place that needs to change when
+ * extraction breaks.
  *
- * We define two strategies in priority order:
+ * Strategies, in priority order:
+ *
  *   1. ProxyStrategy   — delegates to a self-hosted extractor service
- *                        (set TERABOX_EXTRACTOR_URL). Most reliable.
- *   2. PublicStrategy  — best-effort: fetches the share page, scrapes
- *                        the embedded JSON, and resolves the dlink.
+ *                        (set TERABOX_EXTRACTOR_URL). The ONLY reliable
+ *                        option for production, because the public
+ *                        endpoints now require authenticated sessions.
  *
- * The PublicStrategy is included for local/demo use. For production,
- * point TERABOX_EXTRACTOR_URL at a service you control.
+ *   2. PublicStrategy  — best-effort: fetches the share page, follows
+ *                        the mirror redirect (1024terabox.com →
+ *                        terabox.app etc.), scrapes the jsToken, then
+ *                        calls /share/list anonymously to harvest
+ *                        share_id, uk, fs_id, title, thumbnail, etc.
+ *
+ *                        It then attempts /api/download for the dlink.
+ *                        As of mid-2026 TeraBox requires verify_v2 here
+ *                        for anonymous callers, so this step usually
+ *                        fails with a clear "auth required" message.
+ *                        Set TERABOX_EXTRACTOR_URL to bypass it.
  */
 
 import type { ExtractedVideo, VideoQuality } from "@/types";
@@ -51,7 +62,6 @@ class ProxyStrategy implements ExtractionStrategy {
         method: "POST",
         headers,
         body: JSON.stringify({ url }),
-        // Don't cache extraction results at the edge.
         cache: "no-store",
       });
     } catch (err) {
@@ -103,24 +113,27 @@ class ProxyStrategy implements ExtractionStrategy {
 }
 
 // ---------------------------------------------------------------------------
-// 2) Public strategy — best-effort scrape of the share page
+// 2) Public strategy — best-effort scrape (metadata only on most mirrors)
 // ---------------------------------------------------------------------------
-//
-// TeraBox embeds a JSON blob in the share page that includes shareid, uk,
-// and a list of items. We then call /share/list and /share/streaming or
-// /share/download to obtain a dlink. The dlink is the playable URL.
-//
-// This is intentionally minimal and well-commented so you can iterate on
-// it as TeraBox rotates parameters.
 
 interface ShareListItem {
   fs_id: string | number;
   server_filename?: string;
   filename?: string;
-  size?: number;
+  size?: number | string;
   thumbs?: { url1?: string; url2?: string; url3?: string };
-  duration?: number;
-  category?: number; // 1 == video on TeraBox
+  duration?: number | string;
+  category?: number | string; // 1 == video on TeraBox
+  play_forbid?: number | string;
+}
+
+interface ShareListResponse {
+  errno?: number;
+  errmsg?: string;
+  list?: ShareListItem[];
+  title?: string;
+  share_id?: number | string;
+  uk?: number | string;
 }
 
 class PublicStrategy implements ExtractionStrategy {
@@ -131,21 +144,12 @@ class PublicStrategy implements ExtractionStrategy {
   }
 
   async extract(url: string): Promise<ExtractedVideo> {
-    const surl = extractShareId(url);
-    if (!surl) {
-      throw new ExtractionError(
-        "Could not find a share id in the URL",
-        "INVALID_URL",
-      );
-    }
+    const surlFromInput = extractShareId(url);
 
-    // Use the share link's own host for follow-up API calls. Different
-    // TeraBox mirrors (terabox.com, 1024tera.com, 4funbox.com, …) issue
-    // their own jsToken cookies, so we MUST stay on the same host.
-    const shareUrl = new URL(url);
-    const apiHost = `${shareUrl.protocol}//${shareUrl.host}`;
-
-    // Step 1: load the share page to harvest cookies + jsToken + shareid + uk.
+    // Step 1: load the share page, FOLLOWING redirects. Mirror domains
+    // like 1024terabox.com redirect to www.terabox.app where the actual
+    // share lives. We must use the final host for subsequent API calls,
+    // because cookies + jsToken are scoped to it.
     const pageRes = await fetch(url, {
       headers: { "user-agent": userAgent() },
       redirect: "follow",
@@ -170,23 +174,40 @@ class PublicStrategy implements ExtractionStrategy {
       );
     }
 
-    const html = await pageRes.text();
+    // Use the FINAL URL (after redirects) for everything downstream.
+    const finalUrl = new URL(pageRes.url || url);
+    const apiHost = `${finalUrl.protocol}//${finalUrl.host}`;
+    const referer = pageRes.url || url;
     const cookies = pageRes.headers.get("set-cookie") || "";
 
-    const jsToken = matchFirst(html, /fn%28%22([^%"]+)%22%29/i)
-      || matchFirst(html, /window\.jsToken\s*=\s*["']([^"']+)/i);
-    const shareid = matchFirst(html, /"shareid":\s*"?(\d+)"?/i);
-    const uk = matchFirst(html, /"uk":\s*"?(\d+)"?/i)
-      || matchFirst(html, /"share_uk":\s*"?(\d+)"?/i);
-
-    if (!jsToken || !shareid || !uk) {
+    // The shorturl can be on either the original URL (/s/<id>) or the
+    // post-redirect URL (?surl=<id>). Prefer whichever is present.
+    const surl =
+      finalUrl.searchParams.get("surl") ||
+      surlFromInput ||
+      extractShareId(pageRes.url || "");
+    if (!surl) {
       throw new ExtractionError(
-        "Could not parse share metadata. TeraBox may have changed its page structure — update services/terabox/extractor.ts",
+        "Could not find a share id in the URL",
+        "INVALID_URL",
+      );
+    }
+
+    const html = await pageRes.text();
+    const jsToken =
+      matchFirst(html, /fn%28%22([^%"]+)%22%29/i) ||
+      matchFirst(html, /window\.jsToken\s*=\s*["']([^"']+)/i);
+
+    if (!jsToken) {
+      throw new ExtractionError(
+        "Could not parse jsToken from the share page. TeraBox may have changed its page structure — update services/terabox/extractor.ts",
         "EXTRACTION_FAILED",
       );
     }
 
-    // Step 2: list files in the share. Stay on the same host as the share URL.
+    // Step 2: list files in the share. This is the canonical way to get
+    // share_id, uk, fs_id, title, thumbnail, duration on terabox.app —
+    // anonymous calls work here even when other endpoints don't.
     const listUrl = new URL(`${apiHost}/share/list`);
     listUrl.searchParams.set("app_id", "250528");
     listUrl.searchParams.set("web", "1");
@@ -200,7 +221,7 @@ class PublicStrategy implements ExtractionStrategy {
       headers: {
         "user-agent": userAgent(),
         cookie: cookies,
-        referer: url,
+        referer,
       },
       cache: "no-store",
     });
@@ -211,26 +232,26 @@ class PublicStrategy implements ExtractionStrategy {
       );
     }
 
-    const listData = (await listRes.json()) as {
-      errno?: number;
-      list?: ShareListItem[];
-      title?: string;
-    };
+    const listData = (await listRes.json()) as ShareListResponse;
 
     if (listData.errno && listData.errno !== 0) {
-      // Common errnos: -130 = private, -9 = deleted
+      // Common errnos: -130 = private, -9 = deleted, 105 = need pwd
       const privateErrnos = new Set([-130, -9, 105]);
       throw new ExtractionError(
-        `share/list errno=${listData.errno}`,
+        `share/list errno=${listData.errno}${listData.errmsg ? ` (${listData.errmsg})` : ""}`,
         privateErrnos.has(listData.errno) ? "NOT_PUBLIC" : "EXTRACTION_FAILED",
       );
     }
 
-    const video = (listData.list || []).find(
-      (it) => it.category === 1 || /\.(mp4|mkv|mov|webm|avi|flv|m4v)$/i.test(
-        String(it.server_filename || it.filename || ""),
-      ),
-    );
+    const video = (listData.list || []).find((it) => {
+      const cat = typeof it.category === "string" ? Number(it.category) : it.category;
+      return (
+        cat === 1 ||
+        /\.(mp4|mkv|mov|webm|avi|flv|m4v|ts)$/i.test(
+          String(it.server_filename || it.filename || ""),
+        )
+      );
+    });
 
     if (!video) {
       throw new ExtractionError(
@@ -241,23 +262,37 @@ class PublicStrategy implements ExtractionStrategy {
 
     const fsId = String(video.fs_id);
     const title =
-      video.server_filename || video.filename || listData.title || "TeraBox Video";
+      video.server_filename ||
+      video.filename ||
+      listData.title?.replace(/^\//, "") ||
+      "TeraBox Video";
 
-    // Step 3: resolve the direct stream URL via /api/download.
-    // (Different TeraBox front-ends use different endpoints; if this breaks
-    // try /share/download or /api/streaming. Both are rate-limited.)
+    const shareId = listData.share_id;
+    const uk = listData.uk;
+
+    // Step 3: try to resolve the direct stream URL. As of mid-2026, public
+    // anonymous calls return `need verify_v2` here on most mirrors. We try
+    // anyway because (a) some mirrors still allow it and (b) when the
+    // user has set up TERABOX_EXTRACTOR_URL, the ProxyStrategy ran first
+    // and we never reach this code.
+    if (!shareId || !uk) {
+      throw new ExtractionError(
+        "share_id / uk missing from share/list response",
+        "EXTRACTION_FAILED",
+      );
+    }
+
     const dlBody = new URLSearchParams({
       app_id: "250528",
       web: "1",
       channel: "dubox",
       clienttype: "0",
       jsToken,
-      "encrypt": "0",
-      "product": "share",
-      "uk": uk,
-      "shareid": shareid,
-      "primaryid": shareid,
-      "fid_list": `[${fsId}]`,
+      encrypt: "0",
+      product: "share",
+      uk: String(uk),
+      primaryid: String(shareId),
+      fid_list: `[${fsId}]`,
     });
 
     const dlRes = await fetch(`${apiHost}/api/download`, {
@@ -266,7 +301,7 @@ class PublicStrategy implements ExtractionStrategy {
         "content-type": "application/x-www-form-urlencoded",
         "user-agent": userAgent(),
         cookie: cookies,
-        referer: url,
+        referer,
       },
       body: dlBody.toString(),
       cache: "no-store",
@@ -281,12 +316,25 @@ class PublicStrategy implements ExtractionStrategy {
 
     const dlData = (await dlRes.json()) as {
       errno?: number;
+      errmsg?: string;
       dlink?: { dlink: string }[];
     };
 
     if (dlData.errno && dlData.errno !== 0) {
+      // Friendly error for the most common case.
+      const needsAuth =
+        dlData.errno === -6 ||
+        dlData.errno === 400310 ||
+        dlData.errno === 400210 ||
+        /verify_v2/i.test(dlData.errmsg || "");
+      if (needsAuth) {
+        throw new ExtractionError(
+          "TeraBox requires an authenticated session to hand out the download URL for this share. Configure TERABOX_EXTRACTOR_URL with a self-hosted extractor service to play this link.",
+          "EXTRACTION_FAILED",
+        );
+      }
       throw new ExtractionError(
-        `api/download errno=${dlData.errno}`,
+        `api/download errno=${dlData.errno}${dlData.errmsg ? ` (${dlData.errmsg})` : ""}`,
         "EXTRACTION_FAILED",
       );
     }
@@ -299,18 +347,24 @@ class PublicStrategy implements ExtractionStrategy {
       );
     }
 
+    const thumbnail =
+      video.thumbs?.url3 || video.thumbs?.url2 || video.thumbs?.url1;
+    const durationSec =
+      typeof video.duration === "string"
+        ? Number(video.duration)
+        : video.duration;
+    const sizeBytes =
+      typeof video.size === "string" ? Number(video.size) : video.size;
+
     return {
       id: stableIdFromUrl(url),
       sourceUrl: url,
       title,
       directUrl: dlink,
-      thumbnail:
-        video.thumbs?.url3 ||
-        video.thumbs?.url2 ||
-        video.thumbs?.url1,
-      durationSec: video.duration,
-      sizeBytes: video.size,
-      // TeraBox doesn't expose multiple qualities through this path — single track.
+      thumbnail,
+      durationSec: Number.isFinite(durationSec) ? durationSec : undefined,
+      sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : undefined,
+      // TeraBox doesn't expose multiple qualities through this path.
       qualities: [{ label: "Auto", url: dlink }],
       extractedAt: new Date().toISOString(),
     };
@@ -326,7 +380,10 @@ function matchFirst(haystack: string, re: RegExp): string | null {
 // Public façade
 // ---------------------------------------------------------------------------
 
-const STRATEGIES: ExtractionStrategy[] = [new ProxyStrategy(), new PublicStrategy()];
+const STRATEGIES: ExtractionStrategy[] = [
+  new ProxyStrategy(),
+  new PublicStrategy(),
+];
 
 export async function extractTeraBoxVideo(url: string): Promise<ExtractedVideo> {
   if (!isTeraBoxUrl(url)) {
@@ -343,14 +400,12 @@ export async function extractTeraBoxVideo(url: string): Promise<ExtractedVideo> 
       return await strategy.extract(url);
     } catch (err) {
       lastError = err;
-      // If a strategy says NOT_PUBLIC or INVALID_URL, don't try the next one.
       if (
         err instanceof ExtractionError &&
         (err.code === "NOT_PUBLIC" || err.code === "INVALID_URL")
       ) {
         throw err;
       }
-      // Otherwise fall through to the next strategy.
     }
   }
 
